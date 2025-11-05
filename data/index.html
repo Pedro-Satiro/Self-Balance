@@ -1,0 +1,350 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+  <title>Robo Balanceador - PID Tuner</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { 
+      font-family: Arial, sans-serif; 
+      text-align: center; 
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      margin: 0;
+      padding: 20px;
+    }
+    .container { 
+      max-width: 900px; 
+      margin: 0 auto; 
+      padding: 20px; 
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 15px;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+    }
+    .slider { 
+      width: 80%; 
+      margin: 10px auto; 
+      height: 8px;
+      border-radius: 5px;
+      background: #ddd;
+      outline: none;
+      opacity: 0.7;
+      transition: opacity 0.2s;
+    }
+    .slider:hover {
+      opacity: 1;
+    }
+    .slider::-webkit-slider-thumb {
+      appearance: none;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: #04AA6D;
+      cursor: pointer;
+    }
+    .slider-container { 
+      margin: 20px; 
+      padding: 15px; 
+      border: 2px solid rgba(255, 255, 255, 0.3); 
+      border-radius: 10px; 
+      background: rgba(255, 255, 255, 0.1);
+    }
+    .slider-container h3 {
+      margin: 10px 0;
+      font-size: 1.3em;
+    }
+    span { 
+      font-size: 1.4em; 
+      font-weight: bold; 
+      color: #FFD700;
+    }
+    canvas { 
+      max-width: 100%; 
+      background: rgba(255, 255, 255, 0.9);
+      border-radius: 10px;
+      margin-top: 20px;
+    }
+    .status {
+      padding: 10px;
+      margin: 10px 0;
+      border-radius: 5px;
+      font-weight: bold;
+    }
+    .status.connected {
+      background: rgba(76, 175, 80, 0.3);
+      border: 2px solid #4CAF50;
+    }
+    .status.disconnected {
+      background: rgba(244, 67, 54, 0.3);
+      border: 2px solid #f44336;
+    }
+    h1 {
+      text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+      margin-bottom: 30px;
+    }
+    .chart-container {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 15px;
+      padding: 20px;
+      margin-top: 20px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🤖 Robô Self-Balance - PID Tuner</h1>
+    
+    <div class="status disconnected" id="connection-status">
+      🔴 Desconectado do ESP32
+    </div>
+    
+    <div class="slider-container">
+      <h3>Kp (Proporcional): <span id="kp_val">10.0</span></h3>
+      <input type="range" min="0" max="100" step="0.5" value="10" class="slider" id="kp">
+      <small>Controla a resposta imediata ao erro</small>
+    </div>
+    
+    <div class="slider-container">
+      <h3>Ki (Integral): <span id="ki_val">0.5</span></h3>
+      <input type="range" min="0" max="20" step="0.1" value="0.5" class="slider" id="ki">
+      <small>Elimina erro constante ao longo do tempo</small>
+    </div>
+    
+    <div class="slider-container">
+      <h3>Kd (Derivativo): <span id="kd_val">1.0</span></h3>
+      <input type="range" min="0" max="50" step="0.2" value="1" class="slider" id="kd">
+      <small>Reduz oscilações e melhora estabilidade</small>
+    </div>
+
+    <div class="chart-container">
+      <h3>📊 Monitoramento em Tempo Real</h3>
+      <canvas id="pidChart"></canvas>
+    </div>
+  </div>
+
+<script>
+  // Inicializa o WebSocket
+  var gateway = `ws://${window.location.hostname}/ws`;
+  var websocket;
+  var connectionStatus = document.getElementById('connection-status');
+  
+  window.addEventListener('load', onLoad);
+
+  function onLoad(event) {
+    initWebSocket();
+    initChart();
+    initSliders();
+  }
+
+  function initWebSocket() {
+    console.log('Tentando abrir conexão WebSocket...');
+    websocket = new WebSocket(gateway);
+    websocket.onopen  = onOpen;
+    websocket.onclose = onClose;
+    websocket.onmessage = onMessage;
+    websocket.onerror = onError;
+  }
+
+  function onOpen(event) { 
+    console.log('✅ Conexão WebSocket aberta');
+    connectionStatus.innerHTML = '🟢 Conectado ao ESP32';
+    connectionStatus.className = 'status connected';
+  }
+  
+  function onClose(event) { 
+    console.log('❌ Conexão WebSocket fechada');
+    connectionStatus.innerHTML = '🔴 Desconectado - Tentando reconectar...';
+    connectionStatus.className = 'status disconnected';
+    setTimeout(initWebSocket, 2000); 
+  }
+
+  function onError(event) {
+    console.error('❌ Erro no WebSocket:', event);
+    connectionStatus.innerHTML = '🔴 Erro de conexão';
+    connectionStatus.className = 'status disconnected';
+  }
+  
+  // Função para enviar dados (JSON) para o ESP32
+  function sendJson(key, value) {
+    if (websocket.readyState === WebSocket.OPEN) {
+      var obj = {};
+      obj[key] = value;
+      websocket.send(JSON.stringify(obj));
+      console.log(`📤 Enviado: ${key} = ${value}`);
+    } else {
+      console.warn('⚠️ WebSocket não está conectado');
+    }
+  }
+
+  // --- SLIDERS ---
+  function initSliders() {
+    // Atualiza valores em tempo real
+    document.getElementById('kp').addEventListener('input', e => {
+      document.getElementById('kp_val').innerText = parseFloat(e.target.value).toFixed(1);
+    });
+    document.getElementById('ki').addEventListener('input', e => {
+      document.getElementById('ki_val').innerText = parseFloat(e.target.value).toFixed(1);
+    });
+    document.getElementById('kd').addEventListener('input', e => {
+      document.getElementById('kd_val').innerText = parseFloat(e.target.value).toFixed(1);
+    });
+
+    // Envia o valor SÓ QUANDO o usuário solta o mouse (evita spam)
+    document.getElementById('kp').addEventListener('change', e => sendJson('kp', parseFloat(e.target.value)));
+    document.getElementById('ki').addEventListener('change', e => sendJson('ki', parseFloat(e.target.value)));
+    document.getElementById('kd').addEventListener('change', e => sendJson('kd', parseFloat(e.target.value)));
+
+    // Define os valores iniciais
+    document.getElementById('kp_val').innerText = document.getElementById('kp').value;
+    document.getElementById('ki_val').innerText = document.getElementById('ki').value;
+    document.getElementById('kd_val').innerText = document.getElementById('kd').value;
+  }
+
+  // --- GRÁFICO (CHART.JS) ---
+  var ctx = document.getElementById('pidChart').getContext('2d');
+  var chart;
+
+  function initChart() {
+    chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [], // Eixo X (tempo)
+        datasets: [
+          {
+            label: '📐 Ângulo (°)',
+            data: [],
+            borderColor: '#2196F3',
+            backgroundColor: 'rgba(33, 150, 243, 0.1)',
+            borderWidth: 3,
+            fill: false,
+            yAxisID: 'y',
+            tension: 0.1
+          },
+          {
+            label: '❌ Erro (°)',
+            data: [],
+            borderColor: '#F44336',
+            backgroundColor: 'rgba(244, 67, 54, 0.1)',
+            borderWidth: 2,
+            fill: false,
+            yAxisID: 'y',
+            tension: 0.1
+          },
+          {
+            label: '⚡ Duty Cycle',
+            data: [],
+            borderColor: '#4CAF50',
+            backgroundColor: 'rgba(76, 175, 80, 0.1)',
+            borderWidth: 2,
+            fill: false,
+            yAxisID: 'y1',
+            tension: 0.1
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        animation: {
+          duration: 0 // Desabilita animação para melhor performance
+        },
+        interaction: {
+          intersect: false,
+        },
+        scales: {
+          x: {
+            display: true,
+            title: { 
+              text: '⏱️ Tempo', 
+              display: true,
+              color: '#333',
+              font: { size: 14, weight: 'bold' }
+            },
+            grid: { color: 'rgba(0,0,0,0.1)' }
+          },
+          y: {
+            type: 'linear',
+            display: true,
+            position: 'left',
+            title: { 
+              text: '📐 Ângulo/Erro (graus)', 
+              display: true,
+              color: '#333',
+              font: { size: 14, weight: 'bold' }
+            },
+            grid: { color: 'rgba(0,0,0,0.1)' },
+            min: -45,
+            max: 45
+          },
+          y1: {
+            type: 'linear',
+            display: true,
+            position: 'right',
+            title: { 
+              text: '⚡ Duty Cycle (PWM)', 
+              display: true,
+              color: '#333',
+              font: { size: 14, weight: 'bold' }
+            },
+            grid: { drawOnChartArea: false },
+            min: -255,
+            max: 255
+          }
+        },
+        plugins: {
+          legend: {
+            display: true,
+            position: 'top',
+            labels: {
+              font: { size: 12, weight: 'bold' },
+              color: '#333'
+            }
+          },
+          tooltip: {
+            mode: 'index',
+            intersect: false,
+          }
+        }
+      }
+    });
+  }
+
+  // Função que recebe dados (JSON) do ESP32 e atualiza o gráfico
+  function onMessage(event) {
+    try {
+      var data = JSON.parse(event.data);
+      console.log('📥 Dados recebidos:', data);
+
+      var labels = chart.data.labels;
+      var now = new Date().toLocaleTimeString();
+      labels.push(now);
+
+      // Adiciona os novos dados
+      chart.data.datasets[0].data.push(parseFloat(data.angle).toFixed(2));
+      chart.data.datasets[1].data.push(parseFloat(data.error).toFixed(2));
+      chart.data.datasets[2].data.push(parseFloat(data.duty).toFixed(0));
+
+      // Limita o gráfico a 50 pontos para não consumir muita memória
+      var maxPoints = 50;
+      if(labels.length > maxPoints) {
+        labels.shift();
+        chart.data.datasets.forEach((dataset) => {
+          dataset.data.shift();
+        });
+      }
+      
+      chart.update('none'); // Atualiza sem animação para melhor performance
+    } catch(e) {
+      console.error('❌ Erro ao processar JSON:', e);
+    }
+  }
+
+  // Adiciona indicador de performance
+  setInterval(() => {
+    var pointCount = chart.data.labels.length;
+    document.title = `Robô PID (${pointCount} pontos) - ${connectionStatus.textContent}`;
+  }, 1000);
+
+</script>
+</body>
+</html>
