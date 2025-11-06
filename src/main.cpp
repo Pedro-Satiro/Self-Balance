@@ -13,7 +13,7 @@
 
 // --- Configurações WiFi ---
 const char* ssid = "R3_SATIRO";      // ✅ Sua rede WiFi
-const char* password = "Froid@1216PM00"; // ✅ Sua senha WiFi
+const char* password = "*"; 
 const char* pc_ip = "192.168.1.14";     // ✅ IP do seu PC (encontrado via ipconfig)
 const int udp_port = 8888;              // Porta UDP para envio
 
