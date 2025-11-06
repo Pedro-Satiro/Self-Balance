@@ -11,9 +11,11 @@
 //  1. CONFIGURAÇÕES DE AJUSTE (TUNING) - EDITE AQUI!
 // =================================================================
 
-// --- Configurações WiFi ---
-const char* ssid = "R3_SATIRO";      // ✅ Sua rede WiFi
-const char* password = "*"; 
+// --- Configurações WiFi ---de WiFi
+const char* password = "icomputacaoufal"; 
+const char* ssid = "IC-ALUNOS";    
+// const char* ssid = "satiro";      
+// const char* password = "teste123987"; 
 const char* pc_ip = "192.168.1.14";     // ✅ IP do seu PC (encontrado via ipconfig)
 const int udp_port = 8888;              // Porta UDP para envio
 
@@ -22,16 +24,14 @@ double Kp = 0.0;
 double Ki = 0.0;  // Reduzido de 15.0 para evitar oscilações
 double Kd = 0.0;
 
-// O ângulo que o robô tentará manter. 
-// Se o seu robô "pensa" que está reto quando está um pouco inclinado,
-// ajuste este valor (ex: 0.5 ou -1.2) até encontrar o ponto de equilíbrio.
-double pid_setpoint = 0.0;
 
-// Offset de calibração do ângulo (ajustado via web)
-double angle_offset = 1.81;
+double pid_setpoint = 0.0;  // Posição de equilíbrio (ajustar se necessário)
+
+// Offset de calibração do ângulo (ajustar para posição vertical real)
+double angle_offset = 0.0;  // Começar com zero e calibrar via web
 
 // =================================================================
-//  2. PINOS E HARDWARE (Baseado no nosso diagrama de teste)
+//  2. PINOS E HARDWARE 
 // =================================================================
 
 // --- Pinos de Controlo do L298N ---
@@ -95,11 +95,11 @@ unsigned long last_print_time = 0;
 // =================================================================
 //  4. FUNÇÃO PID CUSTOMIZADA
 // =================================================================
-double dt = 0.1;
 
 // Função PID customizada com anti-windup avançado
 double computePID(double input) {
   unsigned long now = millis();
+  double dt = (now - last_pid_time) / 1000.0; // Delta time em segundos
   
   // Evita divisão por zero na primeira execução
   if (last_pid_time == 0 || dt <= 0) {
@@ -107,25 +107,20 @@ double computePID(double input) {
     return 0.0;
   }
   
-  // Calcula o erro atual
-  double error = pid_setpoint - input;
+  // Calcula o erro atual (INVERTIDO para lógica correta de balanceamento)
+  // Se robô inclina para frente (+), erro positivo → acelera para frente
+  double error = input - pid_setpoint;
   
   // === TERMO PROPORCIONAL ===
   double proportional = Kp * error;
   
   // === TERMO INTEGRAL ===
-  if (pid_output >= output_max && error > 0) {
-    integral += 0;
-  } else if (pid_output <= output_min && error < 0) {
-    integral += 0;
-  } else {
-    integral += error * dt;
-  }
+  integral += error * dt;
   
   // Anti-windup: limita a integral para evitar saturação
-  // double integral_limit = output_max / (Ki + 0.001); // Evita divisão por zero
-  // if (integral > integral_limit) integral = integral_limit;
-  // if (integral < -integral_limit) integral = -integral_limit;
+  double integral_limit = 50.0; // Limite fixo para evitar windup
+  if (integral > integral_limit) integral = integral_limit;
+  if (integral < -integral_limit) integral = -integral_limit;
   
   // Calcula o termo integral
   double integral_term = Ki * integral;
@@ -141,15 +136,9 @@ double computePID(double input) {
   if (output > output_max) output = output_max;
   if (output < output_min) output = output_min;
   
-  // Anti-windup avançado: se a saída está saturada e o erro tem o mesmo sinal
-  // da saída, para de integrar para evitar windup
-  // if ((output >= output_max && error > 0) || (output <= output_min && error < 0)) {
-  //   integral -= error * dt; // Remove a integração que acabou de ser feita
-  // }
-  
-  // Reset da integral se o erro mudou de sinal (passou pelo setpoint)
-  if ((error > 0 && last_error < 0) || (error < 0 && last_error > 0)) {
-    integral *= 0.0; // Reduz a integral para zero
+  // Anti-windup: se a saída saturou, reduz a integral
+  if ((output >= output_max && error > 0) || (output <= output_min && error < 0)) {
+    integral *= 0.8; // Reduz a integral em 20%
   }
   
   // Atualiza variáveis para próxima iteração
@@ -246,13 +235,13 @@ void setupWebServer() {
     html += "<div class='controls'>";
     html += "<div class='control-group'><h3>⚙️ Controle PID</h3>";
     html += "<div style='margin:10px 0;'>Kp: <span id='kp-value' class='value'>" + String(Kp, 1) + "</span>";
-    html += "<input type='number' id='kp-input' min='0' max='100' step='0.1' value='" + String(Kp, 1) + "' style='width:120px;padding:8px;border:1px solid #ccc;border-radius:3px;margin-left:10px;' placeholder='Digite Kp e pressione Enter'>";
+    html += "<input type='number' id='kp-input' min='0' max='10000' step='0.1' value='" + String(Kp, 1) + "' style='width:120px;padding:8px;border:1px solid #ccc;border-radius:3px;margin-left:10px;' placeholder='Digite Kp e pressione Enter'>";
     html += "</div>";
     html += "<div style='margin:10px 0;'>Ki: <span id='ki-value' class='value'>" + String(Ki, 1) + "</span>";
-    html += "<input type='number' id='ki-input' min='0' max='100' step='0.1' value='" + String(Ki, 1) + "' style='width:120px;padding:8px;border:1px solid #ccc;border-radius:3px;margin-left:10px;' placeholder='Digite Ki e pressione Enter'>";
+    html += "<input type='number' id='ki-input' min='0' max='10000' step='0.1' value='" + String(Ki, 1) + "' style='width:120px;padding:8px;border:1px solid #ccc;border-radius:3px;margin-left:10px;' placeholder='Digite Ki e pressione Enter'>";
     html += "</div>";
     html += "<div style='margin:10px 0;'>Kd: <span id='kd-value' class='value'>" + String(Kd, 1) + "</span>";
-    html += "<input type='number' id='kd-input' min='0' max='100' step='0.1' value='" + String(Kd, 1) + "' style='width:120px;padding:8px;border:1px solid #ccc;border-radius:3px;margin-left:10px;' placeholder='Digite Kd e pressione Enter'>";
+    html += "<input type='number' id='kd-input' min='0' max='10000' step='0.1' value='" + String(Kd, 1) + "' style='width:120px;padding:8px;border:1px solid #ccc;border-radius:3px;margin-left:10px;' placeholder='Digite Kd e pressione Enter'>";
     html += "</div>";
     html += "</div>";
     
@@ -294,7 +283,7 @@ void setupWebServer() {
     html += "type:'line',data:{labels:timeLabels,datasets:[";
     html += "{label:'Motor1',data:new Array(maxPoints).fill(0),borderColor:'#ff6384',tension:0.1},";
     html += "{label:'Motor2',data:new Array(maxPoints).fill(0),borderColor:'#36a2eb',tension:0.1}";
-    html += "]},options:{responsive:true,scales:{y:{min:-12,max:12}},plugins:{legend:{display:true}}}});";
+    html += "]},options:{responsive:true,scales:{y:{min:-8,max:8}},plugins:{legend:{display:true}}}});";
     
     html += "function updateCharts(angle,error,duty,volt1,volt2){";
     html += "angleChart.data.datasets[0].data.shift();angleChart.data.datasets[0].data.push(angle);angleChart.update('none');";
@@ -354,7 +343,7 @@ void setupWebServer() {
   });
 
   server.on("/data", []() {
-    double error = pid_setpoint - angle_pitch;
+    double error = angle_pitch - pid_setpoint;  // Consistente com lógica PID
     
     StaticJsonDocument<300> doc;
     doc["angle"] = angle_pitch;
@@ -373,21 +362,46 @@ void setupWebServer() {
   });
 
   server.on("/setPID", []() {
+    bool changed = false;
+    
     if (server.hasArg("kp")) {
-      Kp = server.arg("kp").toFloat();
-      resetPID(); // Reset PID quando parâmetros mudam
+      float new_kp = server.arg("kp").toFloat();
+      // Só atualiza se o valor for válido (não zero a menos que explicitamente definido)
+      if (new_kp >= 0 && (new_kp > 0 || server.arg("kp") == "0" || server.arg("kp") == "0.0")) {
+        Kp = new_kp;
+        changed = true;
+        Serial.print("Kp atualizado para: "); Serial.println(Kp);
+      }
     }
     if (server.hasArg("ki")) {
-      Ki = server.arg("ki").toFloat();
-      resetPID(); // Reset PID quando parâmetros mudam
+      float new_ki = server.arg("ki").toFloat();
+      // Só atualiza se o valor for válido
+      if (new_ki >= 0 && (new_ki > 0 || server.arg("ki") == "0" || server.arg("ki") == "0.0")) {
+        Ki = new_ki;
+        changed = true;
+        Serial.print("Ki atualizado para: "); Serial.println(Ki);
+      }
     }
     if (server.hasArg("kd")) {
-      Kd = server.arg("kd").toFloat();
-      resetPID(); // Reset PID quando parâmetros mudam
+      float new_kd = server.arg("kd").toFloat();
+      // Só atualiza se o valor for válido
+      if (new_kd >= 0 && (new_kd > 0 || server.arg("kd") == "0" || server.arg("kd") == "0.0")) {
+        Kd = new_kd;
+        changed = true;
+        Serial.print("Kd atualizado para: "); Serial.println(Kd);
+      }
     }
     if (server.hasArg("offset")) {
       angle_offset = server.arg("offset").toFloat();
+      Serial.print("Offset atualizado para: "); Serial.println(angle_offset);
     }
+    
+    // Só reseta o PID se algum parâmetro mudou
+    if (changed) {
+      resetPID();
+      Serial.println("PID resetado devido a mudança de parâmetros");
+    }
+    
     server.send(200, "text/plain", "OK");
   });
 
@@ -421,6 +435,7 @@ void updateIMU() {
 
   // Calcula o tempo desde a última leitura (dt) em segundos
   unsigned long now = millis();
+  float dt = (now - last_loop_time) / 1000.0f;
   // last_loop_time é atualizado no loop principal
 
   // Calcula o ângulo (Pitch) usando a gravidade (Acelerómetro)
@@ -447,10 +462,10 @@ void moveMotors(int speed) {
   motor1_pwm = pwm_duty;
   motor2_pwm = pwm_duty;
   
-  // Calcula a tensão aplicada (assumindo alimentação de 12V)
-  // Tensão = (PWM / 255) * 12V
-  motor1_voltage = (motor1_pwm / 255.0) * 12.0;
-  motor2_voltage = (motor2_pwm / 255.0) * 12.0;
+  // Calcula a tensão aplicada (assumindo alimentação de 8V)
+  // Tensão = (PWM / 255) * 8V
+  motor1_voltage = (motor1_pwm / 255.0) * 8.0;
+  motor2_voltage = (motor2_pwm / 255.0) * 8.0;
   
   // Considera a direção (tensão negativa para movimento reverso)
   if (speed < 0) {
@@ -458,13 +473,13 @@ void moveMotors(int speed) {
     motor2_voltage = -motor2_voltage;
   }
 
-  if (speed > 0) { // Robô inclinou para um lado, motores para FRENTE (INVERTIDO)
+  if (speed > 0) { // Robô inclinando para FRENTE, motores rodam para FRENTE
     digitalWrite(M1_IN1, HIGH);
     digitalWrite(M1_IN2, LOW);
     // Motor 2 invertido para rodar na mesma direção que Motor 1
     digitalWrite(M2_IN3, LOW);
     digitalWrite(M2_IN4, HIGH);
-  } else if (speed < 0) { // Robô inclinou para o outro, motores para TRÁS (INVERTIDO)
+  } else if (speed < 0) { // Robô inclinando para TRÁS, motores rodam para TRÁS
     digitalWrite(M1_IN1, LOW);
     digitalWrite(M1_IN2, HIGH);
     // Motor 2 invertido para rodar na mesma direção que Motor 1
@@ -573,7 +588,7 @@ void loop() {
   // --- Loop de Impressão e Envio UDP (Lento, 10Hz) ---
   // Imprime os dados no monitor serial e envia via UDP a cada 100ms
   if (now - last_print_time >= PRINT_INTERVAL_MS) {
-    double error = pid_setpoint - angle_pitch;
+    double error =   // Consistente com lógica PID
     
     // Imprime no Serial Monitor
     Serial.printf("%.2f | %.2f | %.0f | %s\n", 
