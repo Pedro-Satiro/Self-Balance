@@ -8,33 +8,28 @@
 #include <WebServer.h>
 
 // =================================================================
-//  1. CONFIGURAÇÕES DE AJUSTE (TUNING) - EDITE AQUI!
+//  1. CONFIGURAÇÕES DE AJUSTE 
 // =================================================================
 
-// --- Configurações WiFi ---de WiFi
 const char* password = "icomputacaoufal"; 
-const char* ssid = "IC-ALUNOS";    
-// const char* ssid = "satiro";      
-// const char* password = "teste123987"; 
-const char* pc_ip = "192.168.1.14";     // ✅ IP do seu PC (encontrado via ipconfig)
-const int udp_port = 8888;              // Porta UDP para envio
+const char* ssid = "IC-ALUNOS";     
+const char* pc_ip = "192.168.1.14";     
+const int udp_port = 8888;
 
-// Estes são os seus ganhos. Mude estes valores para ajustar o robô.
+// Ganhos iniciais (serão ajustados via Web)
 double Kp = 0.0;
-double Ki = 0.0;  // Reduzido de 15.0 para evitar oscilações
+double Ki = 0.0;  
 double Kd = 0.0;
 
+// Setpoint (ângulo desejado, 0.0 = vertical)
+double pid_setpoint = 0.0;
 
-double pid_setpoint = 0.0;  // Posição de equilíbrio (ajustar se necessário)
-
-// Offset de calibração do ângulo (ajustar para posição vertical real)
-double angle_offset = 0.0;  // Começar com zero e calibrar via web
+// Offset inicial (será ajustado via Web)
+double angle_offset = 1.81;
 
 // =================================================================
 //  2. PINOS E HARDWARE 
 // =================================================================
-
-// --- Pinos de Controlo do L298N ---
 const int M1_IN1 = 19;
 const int M1_IN2 = 18;
 const int M1_ENA_PWM = 5;
@@ -42,113 +37,87 @@ const int M2_IN3 = 17;
 const int M2_IN4 = 16;
 const int M2_ENB_PWM = 4;
 
-// --- Pinos I2C do MPU-6050 ---
 const int MPU_SDA = 21;
 const int MPU_SCL = 22;
 
-// --- Configuração do PWM (ledc) ---
 const int PWM_FREQ = 5000;
-const int PWM_RESOLUTION = 8; // 8 bits = 0-255
+const int PWM_RESOLUTION = 8; 
 const int PWM_CHANNEL_1 = 0;
 const int PWM_CHANNEL_2 = 1;
 
-// --- Objetos de Hardware ---
 Adafruit_MPU6050 mpu;
 
-// --- Objetos WiFi ---
 WiFiUDP udp;
-WebServer server(80);  // Servidor web na porta 80
+WebServer server(80);  
 bool wifi_connected = false;
 
 // =================================================================
 //  3. VARIÁVEIS GLOBAIS DO PID E SENSOR
 // =================================================================
 
-// --- Variáveis Globais do PID ---
-double angle_pitch = 0.0;   // O ângulo atual lido do sensor
-double pid_output = 0.0;    // A saída do PID (velocidade do motor)
+double angle_pitch = 0.0;   
+double pid_output = 0.0;    
 
-// --- Variáveis de Tensão dos Motores ---
-double motor1_voltage = 0.0; // Tensão aplicada ao motor 1 (0-12V)
-double motor2_voltage = 0.0; // Tensão aplicada ao motor 2 (0-12V)
-int motor1_pwm = 0;         // PWM atual do motor 1 (0-255)
-int motor2_pwm = 0;         // PWM atual do motor 2 (0-255)
+double motor1_voltage = 0.0; 
+double motor2_voltage = 0.0; 
+int motor1_pwm = 0;         
+int motor2_pwm = 0;         
 
-// --- Variáveis do PID Customizado ---
-double last_error = 0.0;      // Erro anterior (para derivativo)
-double integral = 0.0;        // Acumulador do termo integral
-double output_min = -200.0;   // Limite mínimo de saída
-double output_max = 200.0;    // Limite máximo de saída
-unsigned long last_pid_time = 0; // Tempo da última execução do PID
+double last_error = 0.0;      
+double integral = 0.0;        
+double output_min = -200.0;   
+double output_max = 200.0;    
+unsigned long last_pid_time = 0; 
 
 // --- Variáveis de Sensor Fusion (Filtro Complementar) ---
 float accelAngleY = 0.0;
 float gyroY = 0.0;
 unsigned long last_loop_time = 0;
 
-// Intervalo do loop de controlo (10ms = 100Hz)
 const int PID_LOOP_INTERVAL_MS = 10;
-// Intervalo para imprimir no monitor (100ms = 10Hz)
 const int PRINT_INTERVAL_MS = 100;
 unsigned long last_print_time = 0;
 
 // =================================================================
-//  4. FUNÇÃO PID CUSTOMIZADA
+//  4. FUNÇÃO PID CUSTOMIZADA (LIMPA)
 // =================================================================
 
-// Função PID customizada com anti-windup avançado
 double computePID(double input) {
   unsigned long now = millis();
-  double dt = (now - last_pid_time) / 1000.0; // Delta time em segundos
+  double dt = (now - last_pid_time) / 1000.0; 
   
-  // Evita divisão por zero na primeira execução
   if (last_pid_time == 0 || dt <= 0) {
     last_pid_time = now;
     return 0.0;
   }
   
-  // Calcula o erro atual (INVERTIDO para lógica correta de balanceamento)
-  // Se robô inclina para frente (+), erro positivo → acelera para frente
-  double error = input - pid_setpoint;
+  double error = pid_setpoint - input;
   
-  // === TERMO PROPORCIONAL ===
   double proportional = Kp * error;
   
-  // === TERMO INTEGRAL ===
   integral += error * dt;
   
-  // Anti-windup: limita a integral para evitar saturação
-  double integral_limit = 50.0; // Limite fixo para evitar windup
+  // --- Lógica Anti-Windup Padrão (Clamping) ---
+  double integral_limit = 50.0; 
   if (integral > integral_limit) integral = integral_limit;
   if (integral < -integral_limit) integral = -integral_limit;
   
-  // Calcula o termo integral
   double integral_term = Ki * integral;
   
-  // === TERMO DERIVATIVO ===
   double derivative = (error - last_error) / dt;
   double derivative_term = Kd * derivative;
   
-  // === SAÍDA TOTAL ===
   double output = proportional + integral_term + derivative_term;
   
-  // Limita a saída final
   if (output > output_max) output = output_max;
   if (output < output_min) output = output_min;
   
-  // Anti-windup: se a saída saturou, reduz a integral
-  if ((output >= output_max && error > 0) || (output <= output_min && error < 0)) {
-    integral *= 0.8; // Reduz a integral em 20%
-  }
-  
-  // Atualiza variáveis para próxima iteração
   last_error = error;
   last_pid_time = now;
   
   return output;
 }
 
-// Função para resetar o PID (útil para recalibração)
 void resetPID() {
   integral = 0.0;
   last_error = 0.0;
@@ -159,7 +128,6 @@ void resetPID() {
 //  5. FUNÇÕES DE CONTROLO DO ROBÔ
 // =================================================================
 
-// Função para conectar WiFi (não bloqueia se falhar)
 void connectWiFi() {
   Serial.print("Conectando ao WiFi");
   WiFi.begin(ssid, password);
@@ -187,11 +155,8 @@ void connectWiFi() {
   }
 }
 
-// Função para enviar dados via UDP
 void sendDataUDP(float angle, float error, float output) {
   if (!wifi_connected) return;
-  
-  // Cria JSON com dados
   StaticJsonDocument<200> doc;
   doc["timestamp"] = millis();
   doc["angle"] = angle;
@@ -201,17 +166,15 @@ void sendDataUDP(float angle, float error, float output) {
   doc["ki"] = Ki;
   doc["kd"] = Kd;
   
-  // Serializa para string
   String jsonString;
   serializeJson(doc, jsonString);
   
-  // Envia via UDP
   udp.beginPacket(pc_ip, udp_port);
   udp.print(jsonString);
   udp.endPacket();
 }
 
-// Função para configurar servidor web
+// servidor web
 void setupWebServer() {
   server.on("/", []() {
     String html = "<!DOCTYPE html><html><head><title>Robo Balanceador</title><meta charset='UTF-8'>";
@@ -224,10 +187,16 @@ void setupWebServer() {
     html += ".slider-container{margin:10px 0;}";
     html += ".slider{width:100%;margin:5px 0;}";
     html += ".value{font-weight:bold;color:#007bff;}";
-    html += ".charts{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:20px;margin:20px 0;}";
+    
+    // --- ALTERAÇÃO DO CSS DO GRÁFICO (2x2) ---
+    html += ".charts{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin:20px 0;}"; // 2 colunas
+    
     html += ".chart-container{background:#f8f9fa;padding:15px;border-radius:5px;}";
     html += "canvas{max-height:300px;}";
-    html += "@media(max-width:768px){.charts{grid-template-columns:1fr 1fr;}.controls{flex-direction:column;}}";
+    
+    // --- ALTERAÇÃO DO CSS (Mobile) ---
+    html += "@media(max-width:768px){.charts{grid-template-columns:1fr;}.controls{flex-direction:column;}}"; // 1 coluna no mobile
+    
     html += "</style></head><body><div class='container'>";
     html += "<h1>🚀 Robo Balanceador ESP32</h1>";
     html += "<div class='status'>WiFi Conectado - IP: " + WiFi.localIP().toString() + "</div>";
@@ -301,7 +270,6 @@ void setupWebServer() {
     html += "function calibrateNow(){";
     html += "fetch('/calibrate').then(response=>response.text()).then(data=>{";
     html += "document.getElementById('offset-value').textContent=data;";
-    html += "document.getElementById('offset-slider').value=data;";
     html += "document.getElementById('offset-input').value=data;";
     html += "alert('Calibração realizada! Offset: '+data+'°');";
     html += "}).catch(error=>console.error('Erro na calibração:',error));}";
@@ -343,7 +311,7 @@ void setupWebServer() {
   });
 
   server.on("/data", []() {
-    double error = angle_pitch - pid_setpoint;  // Consistente com lógica PID
+    double error = angle_pitch - pid_setpoint;  
     
     StaticJsonDocument<300> doc;
     doc["angle"] = angle_pitch;
@@ -366,7 +334,6 @@ void setupWebServer() {
     
     if (server.hasArg("kp")) {
       float new_kp = server.arg("kp").toFloat();
-      // Só atualiza se o valor for válido (não zero a menos que explicitamente definido)
       if (new_kp >= 0 && (new_kp > 0 || server.arg("kp") == "0" || server.arg("kp") == "0.0")) {
         Kp = new_kp;
         changed = true;
@@ -375,7 +342,6 @@ void setupWebServer() {
     }
     if (server.hasArg("ki")) {
       float new_ki = server.arg("ki").toFloat();
-      // Só atualiza se o valor for válido
       if (new_ki >= 0 && (new_ki > 0 || server.arg("ki") == "0" || server.arg("ki") == "0.0")) {
         Ki = new_ki;
         changed = true;
@@ -384,7 +350,6 @@ void setupWebServer() {
     }
     if (server.hasArg("kd")) {
       float new_kd = server.arg("kd").toFloat();
-      // Só atualiza se o valor for válido
       if (new_kd >= 0 && (new_kd > 0 || server.arg("kd") == "0" || server.arg("kd") == "0.0")) {
         Kd = new_kd;
         changed = true;
@@ -396,7 +361,6 @@ void setupWebServer() {
       Serial.print("Offset atualizado para: "); Serial.println(angle_offset);
     }
     
-    // Só reseta o PID se algum parâmetro mudou
     if (changed) {
       resetPID();
       Serial.println("PID resetado devido a mudança de parâmetros");
@@ -406,86 +370,72 @@ void setupWebServer() {
   });
 
   server.on("/calibrate", []() {
-    // Calibra automaticamente: assume que posição atual é 0°
-    // Remove o offset atual temporariamente para obter leitura "crua"
     float temp_offset = angle_offset;
     angle_offset = 0;
     
-    // Aguarda algumas leituras para estabilizar
     delay(100);
     
-    // O novo offset é o negativo do ângulo atual (para zerar)
     angle_offset = -angle_pitch + temp_offset;
     
     server.send(200, "text/plain", String(angle_offset, 1));
   });
-
   server.begin();
 }
 
-// Esta função lê o MPU e calcula o ângulo (Filtro Complementar)
 void updateIMU() {
   sensors_event_t a, g, temp;
   
-  // 🛡️ Proteção contra falhas I2C
   if (!mpu.getEvent(&a, &g, &temp)) {
     Serial.println("⚠️ Falha na leitura do MPU6050!");
-    return; // Mantém último valor válido
+    return;
   }
 
-  // Calcula o tempo desde a última leitura (dt) em segundos
   unsigned long now = millis();
   float dt = (now - last_loop_time) / 1000.0f;
-  // last_loop_time é atualizado no loop principal
+  if (dt <= 0) dt = (float)PID_LOOP_INTERVAL_MS / 1000.0f; 
 
-  // Calcula o ângulo (Pitch) usando a gravidade (Acelerómetro)
   accelAngleY = atan2(a.acceleration.x, a.acceleration.z) * RAD_TO_DEG;
   
-  // Obtém a velocidade angular (Giroscópio)
   gyroY = g.gyro.y * RAD_TO_DEG;
   
-  // Fórmula do Filtro Complementar:
-  // Confia 98% no Giroscópio (rápido) e corrige 2% com o Acelerómetro (preciso)
   angle_pitch = 0.98 * (angle_pitch + gyroY * dt) + 0.02 * (accelAngleY);
   
-  // Aplica offset de calibração
   angle_pitch += angle_offset;
 }
 
-// Esta função move AMBOS os motores com a mesma velocidade/direção
+// =================================================================
+//  5.5. FUNÇÃO DO MOTOR (CORRIGIDA)
+// =================================================================
+
 void moveMotors(int speed) {
-  // Limita a velocidade ao máximo do PWM (255)
   int pwm_duty = abs(speed);
   if (pwm_duty > 255) pwm_duty = 255;
   
-  // Armazena os valores PWM atuais
   motor1_pwm = pwm_duty;
   motor2_pwm = pwm_duty;
   
-  // Calcula a tensão aplicada (assumindo alimentação de 8V)
-  // Tensão = (PWM / 255) * 8V
   motor1_voltage = (motor1_pwm / 255.0) * 8.0;
   motor2_voltage = (motor2_pwm / 255.0) * 8.0;
-  
-  // Considera a direção (tensão negativa para movimento reverso)
   if (speed < 0) {
     motor1_voltage = -motor1_voltage;
     motor2_voltage = -motor2_voltage;
   }
 
-  if (speed > 0) { // Robô inclinando para FRENTE, motores rodam para FRENTE
+  // Lógica de direção corrigida
+  if (speed > 0) {
+    // Ambos para FRENTE
     digitalWrite(M1_IN1, HIGH);
     digitalWrite(M1_IN2, LOW);
-    // Motor 2 invertido para rodar na mesma direção que Motor 1
-    digitalWrite(M2_IN3, LOW);
-    digitalWrite(M2_IN4, HIGH);
-  } else if (speed < 0) { // Robô inclinando para TRÁS, motores rodam para TRÁS
+    digitalWrite(M2_IN3, HIGH); 
+    digitalWrite(M2_IN4, LOW);  
+  } else if (speed < 0) {
+    // Ambos para TRÁS
     digitalWrite(M1_IN1, LOW);
     digitalWrite(M1_IN2, HIGH);
-    // Motor 2 invertido para rodar na mesma direção que Motor 1
-    digitalWrite(M2_IN3, HIGH);
-    digitalWrite(M2_IN4, LOW);
-  } else { // Parar (Freio)
+    digitalWrite(M2_IN3, LOW);  
+    digitalWrite(M2_IN4, HIGH); 
+  } else {
+    // Ambos param (Freio)
     digitalWrite(M1_IN1, LOW);
     digitalWrite(M1_IN2, LOW);
     digitalWrite(M2_IN3, LOW);
@@ -494,18 +444,8 @@ void moveMotors(int speed) {
     motor2_voltage = 0.0;
   }
 
-  // Envia o sinal PWM (velocidade) para os DOIS motores
-  ledcWrite(PWM_CHANNEL_1, pwm_duty);  // Motor 1
-  ledcWrite(PWM_CHANNEL_2, pwm_duty);  // Motor 2
-  
-  // Debug: imprime o status dos motores ocasionalmente
-  static unsigned long last_debug = 0;
-  if (millis() - last_debug > 500) {  // A cada 500ms
-    Serial.print("PWM M1: "); Serial.print(pwm_duty);
-    Serial.print(" | M2: "); Serial.print(pwm_duty);
-    Serial.print(" | Speed: "); Serial.println(speed);
-    last_debug = millis();
-  }
+  ledcWrite(PWM_CHANNEL_1, pwm_duty);
+  ledcWrite(PWM_CHANNEL_2, pwm_duty);
 }
 
 // =================================================================
@@ -517,17 +457,14 @@ void setup() {
   Serial.println("\n🚀 Iniciando Robô Balanceador (WiFi + Serial)...");
   Serial.println("📝 Configure WiFi no topo do código antes de usar bateria!");
 
-  // --- Conecta WiFi ---
   connectWiFi();
 
-  // --- Configura servidor web ---
   if (wifi_connected) {
     setupWebServer();
     Serial.print("🌐 Servidor web: http://");
     Serial.println(WiFi.localIP());
   }
 
-  // --- Inicializa MPU ---
   Wire.begin(MPU_SDA, MPU_SCL);
   if (!mpu.begin()) {
     Serial.println("!!! FALHA AO ENCONTRAR MPU-6050 !!!");
@@ -538,24 +475,22 @@ void setup() {
   mpu.setGyroRange(MPU6050_RANGE_500_DEG);
   Serial.println("✅ MPU-6050 OK!");
 
-  // --- Inicializa Motores (PWM) ---
   pinMode(M1_IN1, OUTPUT); pinMode(M1_IN2, OUTPUT);
   pinMode(M2_IN3, OUTPUT); pinMode(M2_IN4, OUTPUT);
   ledcSetup(PWM_CHANNEL_1, PWM_FREQ, PWM_RESOLUTION);
-  ledcSetup(PWM_CHANNEL_2, PWM_FREQ, PWM_RESOLUTION);
+  ledcSetup(PWM_CHANNEL_2, PWM_FREQ, PWM_RESOLUTION); 
   ledcAttachPin(M1_ENA_PWM, PWM_CHANNEL_1);
   ledcAttachPin(M2_ENB_PWM, PWM_CHANNEL_2);
   Serial.println("✅ Motores OK!");
 
-  // --- Inicializa PID Customizado ---
-  resetPID();                           // Inicializa variáveis do PID
-  last_pid_time = millis();             // Define o tempo inicial do PID
+  resetPID();
+  last_pid_time = millis();
   Serial.println("✅ PID Customizado OK!");
   
   Serial.println("\n--- Loop de Controlo Iniciado ---");
   Serial.println("Ang | Err | Out | Status");
 
-  last_loop_time = millis(); // Define o tempo inicial
+  last_loop_time = millis();
   last_print_time = millis();
 }
 
@@ -565,39 +500,31 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // --- Processa requisições web ---
   if (wifi_connected) {
     server.handleClient();
   }
 
-  // --- Loop de Controlo (Rápido, 100Hz) ---
-  // Roda o loop de PID apenas a cada 10ms
+  // Loop de controle principal (Executa a cada ~10ms)
   if (now - last_loop_time >= PID_LOOP_INTERVAL_MS) {
-    // 1. Lê o sensor e calcula o ângulo
     updateIMU();
-
-    // 2. Calcula o PID customizado
     pid_output = computePID(angle_pitch);
-
-    // 3. Move os motores com a potência calculada pelo PID
     moveMotors(pid_output);
-
-    last_loop_time = now; // Atualiza o tempo do loop de controlo
+    last_loop_time = now; // Reseta o temporizador do loop de controle
   }
 
-  // --- Loop de Impressão e Envio UDP (Lento, 10Hz) ---
-  // Imprime os dados no monitor serial e envia via UDP a cada 100ms
+  // Loop de impressão/envio (Executa a cada ~100ms)
   if (now - last_print_time >= PRINT_INTERVAL_MS) {
-    double error =   // Consistente com lógica PID
+    double error = pid_setpoint - angle_pitch;
     
-    // Imprime no Serial Monitor
     Serial.printf("%.2f | %.2f | %.0f | %s\n", 
                   angle_pitch, error, pid_output, 
                   wifi_connected ? "WiFi✅" : "Offline");
     
-    // Envia via UDP se WiFi conectado
-    sendDataUDP(angle_pitch, error, pid_output);
+    // Só envie UDP se estiver conectado
+    if (wifi_connected) {
+      sendDataUDP(angle_pitch, error, pid_output);
+    }
 
-    last_print_time = now; // Atualiza o tempo de impressão
+    last_print_time = now; // Reseta o temporizador de impressão
   }
 }
