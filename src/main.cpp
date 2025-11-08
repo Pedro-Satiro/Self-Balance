@@ -10,9 +10,9 @@
 // =================================================================
 //  1. CONFIGURAÇÕES DE AJUSTE 
 // =================================================================
-
-const char* password = "icomputacaoufal"; 
-const char* ssid = "IC-ALUNOS";     
+    
+// const char* password = "icomputacaoufal"; 
+// const char* ssid = "IC-ALUNOS";     
 const char* pc_ip = "192.168.1.14";     
 const int udp_port = 8888;
 
@@ -65,8 +65,8 @@ int motor2_pwm = 0;
 
 double last_error = 0.0;      
 double integral = 0.0;        
-double output_min = -200.0;   
-double output_max = 200.0;    
+double output_min = -6.0;   
+double output_max = 6.0;    
 unsigned long last_pid_time = 0; 
 
 // --- Variáveis de Sensor Fusion (Filtro Complementar) ---
@@ -79,51 +79,63 @@ const int PRINT_INTERVAL_MS = 100;
 unsigned long last_print_time = 0;
 
 // =================================================================
-//  4. FUNÇÃO PID CUSTOMIZADA (LIMPA)
+//  4. FUNÇÃO PID CUSTOMIZADA
 // =================================================================
+double dt = 0.1;
 
+// Função PID customizada com anti-windup avançado
 double computePID(double input) {
   unsigned long now = millis();
-  double dt = (now - last_pid_time) / 1000.0; 
-  
+
+
+  // Evita divisão por zero na primeira execução
   if (last_pid_time == 0 || dt <= 0) {
     last_pid_time = now;
     return 0.0;
   }
-  
+// Calcula o erro atual
   double error = pid_setpoint - input;
-  
+// === TERMO PROPORCIONAL ===
   double proportional = Kp * error;
-  
-  integral += error * dt;
-  
-  // --- Lógica Anti-Windup Padrão (Clamping) ---
-  double integral_limit = 50.0; 
-  if (integral > integral_limit) integral = integral_limit;
-  if (integral < -integral_limit) integral = -integral_limit;
-  
+
+  if (pid_output >= output_max && error > 0) {
+    integral += 0;
+  } else if (pid_output <= output_min && error < 0) {
+    integral += 0;
+  } else {
+    integral += error * dt;
+  }
+// Calcula o termo integral
   double integral_term = Ki * integral;
-  
+
+  // === TERMO DERIVATIVO ===
   double derivative = (error - last_error) / dt;
   double derivative_term = Kd * derivative;
-  
+
+  // === SAÍDA TOTAL ===
   double output = proportional + integral_term + derivative_term;
-  
+
+  // Limita a saída final
   if (output > output_max) output = output_max;
   if (output < output_min) output = output_min;
-  
+
+if ((error > 0 && last_error < 0) || (error < 0 && last_error > 0)) {
+    integral *= 0.0; // Reduz a integral para zero
+}
+
+  // Atualiza variáveis para próxima iteração
   last_error = error;
   last_pid_time = now;
-  
+
   return output;
 }
 
+// Função para resetar o PID (útil para recalibração)
 void resetPID() {
   integral = 0.0;
   last_error = 0.0;
   last_pid_time = 0;
 }
-
 // =================================================================
 //  5. FUNÇÕES DE CONTROLO DO ROBÔ
 // =================================================================
@@ -391,9 +403,7 @@ void updateIMU() {
   }
 
   unsigned long now = millis();
-  float dt = (now - last_loop_time) / 1000.0f;
-  if (dt <= 0) dt = (float)PID_LOOP_INTERVAL_MS / 1000.0f; 
-
+  float dt = 0.1; 
   accelAngleY = atan2(a.acceleration.x, a.acceleration.z) * RAD_TO_DEG;
   
   gyroY = g.gyro.y * RAD_TO_DEG;
