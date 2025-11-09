@@ -6,7 +6,7 @@
 ✅ **Já configurado com suas credenciais:**
 ```cpp
 const char* ssid = "R3_SATIRO_5G";      // ✅ Sua rede WiFi
-const char* password = "Froid@1216PM00"; // ✅ Sua senha WiFi  
+const char* password = ""; // ✅ Sua senha WiFi  
 const char* pc_ip = "192.168.1.14";     // ✅ Seu IP atual
 ```
 
