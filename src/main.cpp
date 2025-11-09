@@ -10,6 +10,8 @@
 // =================================================================
 //  1. CONFIGURAÇÕES DE AJUSTE 
 // =================================================================
+const char* password = "0"; 
+const char* ssid = "R3_SATIRO";     
     
 // const char* password = "icomputacaoufal"; 
 // const char* ssid = "IC-ALUNOS";     
@@ -17,9 +19,9 @@ const char* pc_ip = "192.168.1.14";
 const int udp_port = 8888;
 
 // Ganhos iniciais (serão ajustados via Web)
-double Kp = 0.0;
-double Ki = 0.0;  
-double Kd = 0.0;
+double Kp = 0.0;   // Ganho proporcional para resposta rápida
+double Ki = 0.0;    // Ganho integral pequeno para eliminar erro
+double Kd = 0.0;    // Ganho derivativo para amortecimento
 
 // Setpoint (ângulo desejado, 0.0 = vertical)
 double pid_setpoint = 0.0;
@@ -65,8 +67,8 @@ int motor2_pwm = 0;
 
 double last_error = 0.0;      
 double integral = 0.0;        
-double output_min = -6.0;   
-double output_max = 6.0;    
+double output_min = -8.0;     // Limite mínimo: -8V (tensão da bateria)
+double output_max = 8.0;      // Limite máximo: +8V (tensão da bateria)    
 unsigned long last_pid_time = 0; 
 
 // --- Variáveis de Sensor Fusion (Filtro Complementar) ---
@@ -140,30 +142,80 @@ void resetPID() {
 //  5. FUNÇÕES DE CONTROLO DO ROBÔ
 // =================================================================
 
+void scanWiFiNetworks() {
+  Serial.println("🔍 Escaneando redes WiFi disponíveis...");
+  int networksFound = WiFi.scanNetworks();
+  
+  if (networksFound == 0) {
+    Serial.println("❌ Nenhuma rede encontrada!");
+  } else {
+    Serial.print("✅ "); Serial.print(networksFound); Serial.println(" redes encontradas:");
+    
+    for (int i = 0; i < networksFound; i++) {
+      Serial.print("   "); Serial.print(i + 1); Serial.print(". ");
+      Serial.print(WiFi.SSID(i)); Serial.print(" (");
+      Serial.print(WiFi.RSSI(i)); Serial.print(" dBm) ");
+      Serial.print(WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "🔓" : "🔒");
+      
+      // Destaca se encontrou a rede alvo
+      if (WiFi.SSID(i) == String(ssid)) {
+        Serial.print(" ← 🎯 REDE ALVO!");
+      }
+      Serial.println();
+    }
+  }
+  WiFi.scanDelete();
+  Serial.println();
+}
+
 void connectWiFi() {
-  Serial.print("Conectando ao WiFi");
+  Serial.println("\n🔗 Iniciando conexão WiFi...");
+  Serial.print("📶 SSID: "); Serial.println(ssid);
+  Serial.print("🔑 Senha: "); 
+  for(int i = 0; i < strlen(password); i++) Serial.print("*");
+  Serial.println();
+  
+  WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
   
+  Serial.print("⏳ Conectando");
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
     delay(500);
     Serial.print(".");
     attempts++;
+    
+    if (attempts % 10 == 0) {
+      Serial.print("\n📊 Status WiFi: ");
+      switch(WiFi.status()) {
+        case WL_NO_SSID_AVAIL: Serial.print("SSID não encontrado"); break;
+        case WL_CONNECT_FAILED: Serial.print("Falha na conexão"); break;
+        case WL_CONNECTION_LOST: Serial.print("Conexão perdida"); break;
+        case WL_DISCONNECTED: Serial.print("Desconectado"); break;
+        default: Serial.print("Conectando..."); break;
+      }
+      Serial.print(" (Tentativa "); Serial.print(attempts); Serial.println("/30)");
+    }
   }
   
   if (WiFi.status() == WL_CONNECTED) {
     wifi_connected = true;
-    Serial.println("\n✅ WiFi conectado!");
-    Serial.print("IP do ESP32: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("Enviando dados para: ");
-    Serial.print(pc_ip);
-    Serial.print(":");
-    Serial.println(udp_port);
+    Serial.println("\n✅ WiFi conectado com sucesso!");
+    Serial.print("📍 IP do ESP32: "); Serial.println(WiFi.localIP());
+    Serial.print("📡 Gateway: "); Serial.println(WiFi.gatewayIP());
+    Serial.print("🔗 DNS: "); Serial.println(WiFi.dnsIP());
+    Serial.print("📶 RSSI: "); Serial.print(WiFi.RSSI()); Serial.println(" dBm");
+    Serial.print("📤 Enviando dados UDP para: "); Serial.print(pc_ip); Serial.print(":"); Serial.println(udp_port);
     udp.begin(udp_port);
   } else {
     wifi_connected = false;
-    Serial.println("\n❌ WiFi falhou. Continuando offline...");
+    Serial.println("\n❌ Falha na conexão WiFi!");
+    Serial.println("🔧 Verifique:");
+    Serial.println("   - Nome da rede (SSID)");
+    Serial.println("   - Senha do WiFi");
+    Serial.println("   - Sinal da rede");
+    Serial.println("   - Compatibilidade 2.4GHz");
+    Serial.println("⚠️ Continuando em modo offline...");
   }
 }
 
@@ -266,6 +318,7 @@ void setupWebServer() {
     html += "{label:'Motor2',data:new Array(maxPoints).fill(0),borderColor:'#36a2eb',tension:0.1}";
     html += "]},options:{responsive:true,scales:{y:{min:-8,max:8}},plugins:{legend:{display:true}}}});";
     
+    html += "let chartUpdateCounter = 0;";
     html += "function updateCharts(angle,error,duty,volt1,volt2){";
     html += "angleChart.data.datasets[0].data.shift();angleChart.data.datasets[0].data.push(angle);angleChart.update('none');";
     html += "errorChart.data.datasets[0].data.shift();errorChart.data.datasets[0].data.push(error);errorChart.update('none');";
@@ -277,13 +330,12 @@ void setupWebServer() {
     html += "fetch('/setPID?'+param+'='+value,{method:'GET'}).catch(err=>console.error('Erro PID:',err));}";
     
     html += "function fastUpdatePID(param,value){";
-    html += "const xhr=new XMLHttpRequest();xhr.open('GET','/setPID?'+param+'='+value,true);xhr.send();}";
+    html += "fetch('/setPID?'+param+'='+value,{method:'GET'}).catch(err=>console.error('Erro PID:',err));}";
     
     html += "function calibrateNow(){";
     html += "fetch('/calibrate').then(response=>response.text()).then(data=>{";
     html += "document.getElementById('offset-value').textContent=data;";
     html += "document.getElementById('offset-input').value=data;";
-    html += "alert('Calibração realizada! Offset: '+data+'°');";
     html += "}).catch(error=>console.error('Erro na calibração:',error));}";
     
     html += "function syncKp(value){";
@@ -306,6 +358,7 @@ void setupWebServer() {
     html += "document.getElementById('ki-input').addEventListener('keypress',function(e){if(e.key==='Enter'){syncKi(this.value);}});";
     html += "document.getElementById('kd-input').addEventListener('keypress',function(e){if(e.key==='Enter'){syncKd(this.value);}});";
     html += "document.getElementById('offset-input').addEventListener('keypress',function(e){if(e.key==='Enter'){syncOffset(this.value);}});";
+    html += "let isFirstLoad = true;";
     html += "function updateData(){";
     html += "fetch('/data').then(response=>response.json()).then(data=>{";
     html += "document.getElementById('current-data').innerHTML=";
@@ -314,9 +367,20 @@ void setupWebServer() {
     html += "'<strong>Duty:</strong> '+data.output.toFixed(0)+'<br>'+";
     html += "'<strong>PID:</strong> Kp='+data.kp+' Ki='+data.ki+' Kd='+data.kd+'<br>'+";
     html += "'<strong>Offset:</strong> '+data.offset.toFixed(1)+'°';";
-    html += "updateCharts(data.angle,data.error,data.output,data.motor1_voltage,data.motor2_voltage);";
+    html += "document.getElementById('kp-value').textContent=data.kp.toFixed(1);";
+    html += "document.getElementById('ki-value').textContent=data.ki.toFixed(1);";
+    html += "document.getElementById('kd-value').textContent=data.kd.toFixed(1);";
+    html += "document.getElementById('offset-value').textContent=data.offset.toFixed(1);";
+    html += "if(isFirstLoad){";
+    html += "document.getElementById('kp-input').value=data.kp.toFixed(1);";
+    html += "document.getElementById('ki-input').value=data.ki.toFixed(1);";
+    html += "document.getElementById('kd-input').value=data.kd.toFixed(1);";
+    html += "document.getElementById('offset-input').value=data.offset.toFixed(2);";
+    html += "isFirstLoad=false;}";
+    html += "chartUpdateCounter++;if(chartUpdateCounter>=2){";
+    html += "updateCharts(data.angle,data.error,data.output,data.motor1_voltage,data.motor2_voltage);chartUpdateCounter=0;}";
     html += "}).catch(error=>console.error('Erro:',error));}";
-    html += "setInterval(updateData,100);updateData();";
+    html += "setInterval(updateData,150);updateData();";
     html += "</script></div></body></html>";
     
     server.send(200, "text/html", html);
@@ -403,47 +467,73 @@ void updateIMU() {
   }
 
   unsigned long now = millis();
-  float dt = 0.1; 
-  accelAngleY = atan2(a.acceleration.x, a.acceleration.z) * RAD_TO_DEG;
+  float dt = (now - last_loop_time) / 1000.0f;  // Delta time real em segundos
   
-  gyroY = g.gyro.y * RAD_TO_DEG;
+  // Cálculo correto do ângulo de inclinação (pitch) para robô balanceador
+  // Para um robô vertical: atan2(aceleração_frente, aceleração_vertical)
+  accelAngleY = atan2(a.acceleration.y, sqrt(a.acceleration.x * a.acceleration.x + a.acceleration.z * a.acceleration.z)) * RAD_TO_DEG;
   
+  // Velocidade angular do giroscópio (em graus/s)
+  gyroY = g.gyro.x * RAD_TO_DEG;  // Mudança para eixo X do giroscópio
+  
+  // Filtro complementar: 98% giroscópio + 2% acelerômetro
   angle_pitch = 0.98 * (angle_pitch + gyroY * dt) + 0.02 * (accelAngleY);
   
+  // Aplica offset de calibração
   angle_pitch += angle_offset;
+  
+  // Limita o ângulo para ±90 graus
+  if (angle_pitch > 90.0) angle_pitch = 90.0;
+  if (angle_pitch < -90.0) angle_pitch = -90.0;
 }
 
 // =================================================================
 //  5.5. FUNÇÃO DO MOTOR (CORRIGIDA)
 // =================================================================
 
-void moveMotors(int speed) {
-  int pwm_duty = abs(speed);
+void moveMotors(double speed) {
+  // Debug: mostra valores de entrada
+  static unsigned long last_debug_input = 0;
+  if (millis() - last_debug_input > 500) {
+    Serial.print("📥 INPUT Motor - Speed: "); Serial.print(speed, 2);
+    Serial.print("V | Abs: "); Serial.println(abs(speed), 2);
+    last_debug_input = millis();
+  }
+  
+  // Converte tensão (speed) para PWM (0-255)
+  // speed vem em volts (-8V a +8V), precisa converter para PWM (0-255)
+  int pwm_duty = abs(speed) * 255.0 / 8.0;  // Converte V para PWM
   if (pwm_duty > 255) pwm_duty = 255;
+  
+  // ZONA MORTA: PWM mínimo para superar atrito dos motores
+  if (pwm_duty > 0 && pwm_duty < 50) {
+    pwm_duty = 50;  // PWM mínimo para mover os motores
+  }
   
   motor1_pwm = pwm_duty;
   motor2_pwm = pwm_duty;
   
-  motor1_voltage = (motor1_pwm / 255.0) * 8.0;
-  motor2_voltage = (motor2_pwm / 255.0) * 8.0;
+  // A tensão desejada é o próprio speed (já em volts)
+  motor1_voltage = abs(speed);  // Tensão desejada (0 a 8V)
+  motor2_voltage = abs(speed);  // Tensão desejada (0 a 8V)
   if (speed < 0) {
     motor1_voltage = -motor1_voltage;
     motor2_voltage = -motor2_voltage;
   }
 
-  // Lógica de direção corrigida
+  // Lógica de direção - ambos motores na mesma direção (corrigido fisicamente)
   if (speed > 0) {
-    // Ambos para FRENTE
+    // Ambos motores: FRENTE
     digitalWrite(M1_IN1, HIGH);
     digitalWrite(M1_IN2, LOW);
-    digitalWrite(M2_IN3, HIGH); 
-    digitalWrite(M2_IN4, LOW);  
+    digitalWrite(M2_IN3, HIGH);  // Mesma direção que M1
+    digitalWrite(M2_IN4, LOW);   // Mesma direção que M1
   } else if (speed < 0) {
-    // Ambos para TRÁS
+    // Ambos motores: TRÁS
     digitalWrite(M1_IN1, LOW);
     digitalWrite(M1_IN2, HIGH);
-    digitalWrite(M2_IN3, LOW);  
-    digitalWrite(M2_IN4, HIGH); 
+    digitalWrite(M2_IN3, LOW);   // Mesma direção que M1
+    digitalWrite(M2_IN4, HIGH);  // Mesma direção que M1
   } else {
     // Ambos param (Freio)
     digitalWrite(M1_IN1, LOW);
@@ -456,6 +546,17 @@ void moveMotors(int speed) {
 
   ledcWrite(PWM_CHANNEL_1, pwm_duty);
   ledcWrite(PWM_CHANNEL_2, pwm_duty);
+  
+  // Debug detalhado dos motores
+  static unsigned long last_debug = 0;
+  if (millis() - last_debug > 1000) {  // A cada 1 segundo
+    Serial.print("🔧 DEBUG Motor - Speed: "); Serial.print(speed);
+    Serial.print(" | PWM: "); Serial.print(pwm_duty);
+    Serial.print(" | M1_V: "); Serial.print(motor1_voltage, 1);
+    Serial.print("V | M2_V: "); Serial.print(motor2_voltage, 1);
+    Serial.print("V | PID_Out: "); Serial.println(pid_output, 1);
+    last_debug = millis();
+  }
 }
 
 // =================================================================
@@ -467,12 +568,15 @@ void setup() {
   Serial.println("\n🚀 Iniciando Robô Balanceador (WiFi + Serial)...");
   Serial.println("📝 Configure WiFi no topo do código antes de usar bateria!");
 
+  scanWiFiNetworks();
   connectWiFi();
 
   if (wifi_connected) {
     setupWebServer();
     Serial.print("🌐 Servidor web: http://");
     Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("⚠️ Modo offline: apenas controle via Serial Monitor");
   }
 
   Wire.begin(MPU_SDA, MPU_SCL);
@@ -526,7 +630,18 @@ void loop() {
   if (now - last_print_time >= PRINT_INTERVAL_MS) {
     double error = pid_setpoint - angle_pitch;
     
-    Serial.printf("%.2f | %.2f | %.0f | %s\n", 
+    // Debug detalhado a cada 2 segundos
+    static unsigned long last_detailed_debug = 0;
+    if (millis() - last_detailed_debug > 2000) {
+      Serial.println("\n📊 DEBUG DETALHADO:");
+      Serial.print("  Accel Y: "); Serial.print(accelAngleY, 2); Serial.println("°");
+      Serial.print("  Gyro X: "); Serial.print(gyroY, 2); Serial.println("°/s");
+      Serial.print("  Ângulo Final: "); Serial.print(angle_pitch, 2); Serial.println("°");
+      Serial.print("  Offset: "); Serial.print(angle_offset, 2); Serial.println("°");
+      last_detailed_debug = millis();
+    }
+    
+    Serial.printf("Ang:%.1f° | Err:%.1f° | Out:%.0f | %s\n", 
                   angle_pitch, error, pid_output, 
                   wifi_connected ? "WiFi✅" : "Offline");
     
